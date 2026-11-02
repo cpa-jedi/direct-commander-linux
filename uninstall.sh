@@ -39,7 +39,9 @@ rm -rf "$TARGET"
 DESKTOP_DIR="$(readlink -f "$WIN_HOME/Desktop" || true)"
 for f in "$HOME/.local/share/applications/wine/Programs/Direct Commander.desktop" \
          "$DESKTOP_DIR/Direct Commander.desktop"; do
-  [ -f "$f" ] && grep -qF "WINEPREFIX=\"$WINEPREFIX\"" "$f" || continue
+  if [ ! -f "$f" ] || ! grep -qF "WINEPREFIX=\"$WINEPREFIX\"" "$f"; then
+    continue
+  fi
   ICON="$(sed -n 's/^Icon=//p' "$f")"
   [ -z "$ICON" ] || rm -f "$HOME/.local/share/icons/hicolor/"*/apps/"$ICON.png"
   rm -f "$f"
