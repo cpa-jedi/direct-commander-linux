@@ -1,111 +1,50 @@
 #!/usr/bin/env bash
 #
-# Удаление Директ Коммандера, установленного через install.sh или install-wine.sh.
-# Пользовательские данные (кампании, настройки, логины) НЕ удаляются:
-# путь к ним печатается в конце, удаляйте вручную, если нужно.
+# Удаление Директ Коммандера, установленного через install-wine.sh.
+# Пользовательские данные (кампании, настройки, авторизация) и сам префикс
+# остаются, пути к ним печатаются в конце.
 #
 # Использование:
-#   ./uninstall.sh            — удалить установку через Bottles (по умолчанию)
-#   ./uninstall.sh --wine     — удалить установку через обычный Wine
-#   ./uninstall.sh --force    — удалять, даже если приложение уже не на месте
-#
-# Переменные окружения:
-#   BOTTLE_NAME=МоёИмя        — имя бутылки, если оно не Direct
-#   WINE_PREFIX=~/.wine-dc    — префикс, если он не ~/.wine-dc
-#   APP_ID=direct-commander   — имена лаунчера, ярлыка и иконки
+#   ./uninstall.sh
+#   WINE_PREFIX=~/.wine-commander ./uninstall.sh   если префикс свой
 
 set -euo pipefail
 
-MODE="${MODE:-bottles}"
-FORCE=0
+export WINEPREFIX="${WINE_PREFIX:-$HOME/.wine-dc}"
+WIN_HOME="$WINEPREFIX/drive_c/users/${USER:-$(id -un)}"
+TARGET="$WIN_HOME/AppData/Local/Programs/Direct Commander"
 
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --wine)    MODE="wine" ;;
-    --bottles) MODE="bottles" ;;
-    --force)   FORCE=1 ;;
-    *) echo "Неизвестный аргумент: $1 (ожидаются --wine, --bottles, --force)" >&2; exit 1 ;;
-  esac
-  shift
-done
+die() { printf '\nОшибка: %s\n' "$*" >&2; exit 1; }
 
-APP_ID="${APP_ID:-direct-commander}"
-LAUNCHER="$HOME/bin/$APP_ID"
-DESKTOP="$HOME/.local/share/applications/$APP_ID.desktop"
-ICON="$HOME/.local/share/icons/$APP_ID.png"
+# --- проверки ----------------------------------------------------------------
 
-if [ "$MODE" = "wine" ]; then
-  WINE_PREFIX="${WINE_PREFIX:-$HOME/.wine-dc}"
-  ROOT="$WINE_PREFIX"
-  WHAT="префикс $WINE_PREFIX"
-  OTHER="через Bottles, для неё запустите ./uninstall.sh без аргументов"
-else
-  BOTTLE_NAME="${BOTTLE_NAME:-Direct}"
-  ROOT="$HOME/.var/app/com.usebottles.bottles/data/bottles/bottles/$BOTTLE_NAME"
-  WHAT="бутылка «$BOTTLE_NAME»"
-  OTHER="через обычный Wine, для неё запустите ./uninstall.sh --wine"
-fi
-TARGET="$ROOT/drive_c/Program Files (x86)/DirectCommander"
+[ -d "$WINEPREFIX/drive_c" ] || die "префикс не найден: $WINEPREFIX"
+case "$WINEPREFIX" in "$HOME"/?*) ;; *) die "неожиданный путь префикса: $WINEPREFIX" ;; esac
 
-# страховка перед rm -rf: путь обязан быть внутри домашней папки и оканчиваться на DirectCommander
-case "$TARGET" in "$HOME"/*) ;; *) echo "Неожиданный путь: $TARGET" >&2; exit 1 ;; esac
-[ "${TARGET##*/}" = "DirectCommander" ] || { echo "Неожиданный путь: $TARGET" >&2; exit 1; }
-
-# --- ничего не удаляем, если это не та установка -----------------------------
-
-if [ ! -d "$TARGET" ] && [ "$FORCE" -eq 0 ]; then
-  echo "Приложение не найдено по пути:" >&2
-  echo "  $TARGET" >&2
-  echo >&2
-  echo "Выбран режим: $WHAT." >&2
-  echo "Если вы ставили Коммандер $OTHER." >&2
-  echo "Если приложение вы уже удалили руками и нужно убрать только ярлык:" >&2
-  echo "  ./uninstall.sh --force" >&2
-  exit 1
-fi
-
-# лаунчер ссылается на свою установку: если он указывает куда-то ещё,
-# значит режим и APP_ID не от одной установки, и трогать тут нечего
-if [ -f "$LAUNCHER" ] && ! grep -qF "$ROOT/" "$LAUNCHER" 2>/dev/null && [ "$FORCE" -eq 0 ]; then
-  echo "Ярлык и установка не совпадают, ничего не удаляю." >&2
-  echo >&2
-  echo "  $LAUNCHER ссылается не на $ROOT" >&2
-  echo >&2
-  echo "Похоже, APP_ID и режим взяты от разных установок." >&2
-  echo "Запустите с теми же переменными, с какими ставили, например:" >&2
-  echo "  APP_ID=$APP_ID WINE_PREFIX=<ваш префикс> ./uninstall.sh --wine" >&2
-  exit 1
-fi
-
-# приложение не должно быть запущено: иначе после удаления файлов оно зависнет
-if command -v pgrep >/dev/null 2>&1 && [ "$FORCE" -eq 0 ]; then
-  RUNNING=""
-  for pid in $(pgrep -f "Direct Commander.exe" 2>/dev/null || true); do
-    grep -qzxF "WINEPREFIX=$ROOT" "/proc/$pid/environ" 2>/dev/null && RUNNING="$RUNNING $pid"
-  done
-  if [ -n "$RUNNING" ]; then
-    echo "Директ Коммандер сейчас запущен в этой установке (PID:$RUNNING)." >&2
-    echo "Закройте программу и повторите, иначе окно зависнет на экране завершения." >&2
-    echo "Если окно уже не отвечает, прибейте процесс:" >&2
-    echo "  kill$RUNNING" >&2
-    exit 1
-  fi
+# иначе после удаления файлов окно зависнет на экране завершения
+if pgrep -f "Direct Commander.exe" >/dev/null 2>&1; then
+  die "Директ Коммандер запущен. Закройте его и повторите."
 fi
 
 # --- удаление ----------------------------------------------------------------
 
-rm -rf "$TARGET"
-rm -f "$LAUNCHER" "$DESKTOP" "$ICON"
-
-command -v update-desktop-database >/dev/null 2>&1 \
-  && update-desktop-database "$(dirname "$DESKTOP")" >/dev/null 2>&1 || true
-
-printf '\nПриложение, ярлык и иконка удалены (%s).\n' "$WHAT"
-printf '\nПользовательские данные остались здесь:\n  %s\n' \
-  "$ROOT/drive_c/users/$USER/AppData/Roaming/direct-commander"
-
-if [ "$MODE" = "wine" ]; then
-  printf '\nСам префикс тоже остался. Если он больше не нужен, удалите его целиком:\n    rm -rf "%s"\n' "$WINE_PREFIX"
-else
-  printf '\nСама бутылка «%s» тоже осталась, удалить её можно из интерфейса Bottles.\n' "$BOTTLE_NAME"
+# штатный деинсталлятор убирает программу и запись в реестре префикса
+if [ -f "$TARGET/Uninstall Direct Commander.exe" ]; then
+  wine "$TARGET/Uninstall Direct Commander.exe" /currentuser /S >/dev/null 2>&1 || true
+  wineserver -w
 fi
+rm -rf "$TARGET"
+
+# ярлыки, которые сделал Wine: сам он их не убирает. Только ведущие в этот префикс.
+DESKTOP_DIR="$(readlink -f "$WIN_HOME/Desktop" || true)"
+for f in "$HOME/.local/share/applications/wine/Programs/Direct Commander.desktop" \
+         "$DESKTOP_DIR/Direct Commander.desktop"; do
+  [ -f "$f" ] && grep -qF "WINEPREFIX=\"$WINEPREFIX\"" "$f" || continue
+  ICON="$(sed -n 's/^Icon=//p' "$f")"
+  [ -z "$ICON" ] || rm -f "$HOME/.local/share/icons/hicolor/"*/apps/"$ICON.png"
+  rm -f "$f"
+done
+
+printf '\nКоммандер удалён.\n'
+printf 'Данные остались: %s\n' "$WIN_HOME/AppData/Roaming/direct-commander"
+printf 'Префикс целиком удаляется так: rm -rf "%s"\n' "$WINEPREFIX"

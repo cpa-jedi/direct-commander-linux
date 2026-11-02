@@ -2,184 +2,84 @@
 #
 # Установка Яндекс Директ Коммандера на Linux через обычный Wine.
 #
-# Скрипт не запускает официальный установщик (под Wine он зацикливается),
-# а распаковывает из него готовое Electron-приложение и кладёт в префикс.
+#  1. Отключает в префиксе заглушку PowerShell. Без этого официальный установщик
+#     и встроенный апдейтер зацикливаются на окне «Не удалось закрыть
+#     Direct Commander»: Wine bug 59670, https://bugs.winehq.org/show_bug.cgi?id=59670
+#  2. Запускает официальный установщик в тихом режиме.
+#
+# Ярлык в меню и на рабочем столе делает сам Wine. Обновления программа ставит сама.
 #
 # Использование:
-#   ./install-wine.sh                     — сам найдёт свежий установщик в ~/Downloads
-#   ./install-wine.sh /путь/к/файлу.exe   — если он лежит в другом месте
+#   ./install-wine.sh                     возьмёт самый свежий установщик из загрузок
+#   ./install-wine.sh /путь/к/файлу.exe
 #
-# Повторный запуск со свежим установщиком работает как обновление:
-# файлы приложения заменяются, пользовательские данные не трогаются.
-#
-# Переменные окружения:
-#   WINE_PREFIX=~/.wine-commander      — свой префикс (по умолчанию ~/.wine-dc)
-#   APP_ID=direct-commander-wine       — свои имена лаунчера, ярлыка и иконки
-#   APP_NAME="Директ Коммандер (wine)" — своё имя пункта в меню
-#   FORCE=1                            — переписать чужой лаунчер с тем же именем
+# Свой префикс (по умолчанию ~/.wine-dc):
+#   WINE_PREFIX=~/.wine-commander ./install-wine.sh
 
 set -euo pipefail
 
-WINE_PREFIX="${WINE_PREFIX:-$HOME/.wine-dc}"
-APP_ID="${APP_ID:-direct-commander}"
-APP_NAME="${APP_NAME:-Директ Коммандер}"
-TARGET="$WINE_PREFIX/drive_c/Program Files (x86)/DirectCommander"
-LAUNCHER="$HOME/bin/$APP_ID"
-DESKTOP="$HOME/.local/share/applications/$APP_ID.desktop"
-ICON="$HOME/.local/share/icons/$APP_ID.png"
-DOWNLOAD_URL="https://yandex.com/project/commander/new"
-FORCE="${FORCE:-0}"
+export WINEPREFIX="${WINE_PREFIX:-$HOME/.wine-dc}"
+# Wine называет папку пользователя в префиксе по логину; $USER бывает не задан
+WIN_HOME="$WINEPREFIX/drive_c/users/${USER:-$(id -un)}"
+TARGET="$WIN_HOME/AppData/Local/Programs/Direct Commander"
 
 die() { printf '\nОшибка: %s\n' "$*" >&2; exit 1; }
 step() { printf '\n==> %s\n' "$*"; }
 
-# --- проверка окружения ------------------------------------------------------
+# --- проверки ----------------------------------------------------------------
 
-command -v 7z >/dev/null 2>&1 || die "не найден 7z. Установите: sudo apt install -y p7zip-full"
 command -v wine >/dev/null 2>&1 || die "не найден wine.
-Нужна стоковая сборка от WineHQ, инструкция по установке:
-  https://gitlab.winehq.org/wine/wine/-/wikis/Download"
+Нужна стоковая сборка от WineHQ: https://gitlab.winehq.org/wine/wine/-/wikis/Download"
 
-# страховка перед rm -rf: путь обязан быть внутри домашней папки и оканчиваться на DirectCommander
-case "$TARGET" in "$HOME"/*) ;; *) die "префикс должен находиться внутри домашней папки, а он здесь:
-  $WINE_PREFIX" ;; esac
-[ "${TARGET##*/}" = "DirectCommander" ] || die "неожиданный путь установки: $TARGET"
-
-# лаунчер с таким именем уже есть и ведёт в другой префикс: это чужая установка
-if [ -f "$LAUNCHER" ] && ! grep -qF "$WINE_PREFIX/" "$LAUNCHER" 2>/dev/null && [ "$FORCE" != "1" ]; then
-  die "лаунчер $LAUNCHER уже существует и ведёт в другую установку.
-Если это Коммандер, поставленный через Bottles, не трогайте его: задайте свои имена,
-и обе установки будут жить рядом.
-  APP_ID=direct-commander-wine APP_NAME='Директ Коммандер (wine)' ./install-wine.sh
-Если всё-таки хотите переписать существующий лаунчер:
-  FORCE=1 ./install-wine.sh"
+# установщик не должен застать программу запущенной
+if pgrep -f "Direct Commander.exe" >/dev/null 2>&1; then
+  die "Директ Коммандер запущен. Закройте его и повторите."
 fi
 
-# приложение не должно быть запущено: иначе файлы заменятся из-под работающего
-# процесса, и он зависнет на экране завершения
-if command -v pgrep >/dev/null 2>&1 && [ "$FORCE" != "1" ]; then
-  RUNNING=""
-  for pid in $(pgrep -f "Direct Commander.exe" 2>/dev/null || true); do
-    grep -qzxF "WINEPREFIX=$WINE_PREFIX" "/proc/$pid/environ" 2>/dev/null && RUNNING="$RUNNING $pid"
-  done
-  [ -z "$RUNNING" ] || die "Директ Коммандер сейчас запущен в этом префиксе (PID:$RUNNING).
-Закройте программу и повторите, иначе она зависнет на экране завершения работы."
-fi
-
-# --- поиск установщика -------------------------------------------------------
+# --- установщик --------------------------------------------------------------
 
 INSTALLER="${1:-}"
 if [ -z "$INSTALLER" ]; then
-  INSTALLER="$(ls -t "$HOME/Downloads/"*[Cc]ommander*.exe "$HOME/Загрузки/"*[Cc]ommander*.exe 2>/dev/null | head -1 || true)"
-  [ -n "$INSTALLER" ] || die "установщик не найден в ~/Downloads.
-Скачайте его с $DOWNLOAD_URL и положите в ~/Downloads,
-либо укажите путь явно:
-  ./install-wine.sh /путь/к/файлу.exe"
-  echo "Найден установщик: $(basename "$INSTALLER")"
+  # xdg-user-dir знает локализованное имя папки («Загрузки» и т.п.),
+  # а если папка не настроена, возвращает $HOME
+  DL_DIR="$(xdg-user-dir DOWNLOAD 2>/dev/null || true)"
+  if [ -z "$DL_DIR" ] || [ "$DL_DIR" = "$HOME" ]; then
+    DL_DIR="$HOME/Downloads"
+  fi
+  INSTALLER="$(ls -t "$DL_DIR"/*[Cc]ommander*.exe 2>/dev/null | head -1 || true)"
+  [ -n "$INSTALLER" ] || die "установщик не найден в $DL_DIR.
+Скачайте его с https://yandex.com/project/commander/new
+или укажите путь явно: ./install-wine.sh /путь/к/файлу.exe"
+  echo "Установщик: $INSTALLER"
 fi
 [ -f "$INSTALLER" ] || die "файл не найден: $INSTALLER"
 
 # --- префикс -----------------------------------------------------------------
 
-if [ ! -d "$WINE_PREFIX/drive_c" ]; then
-  step "Создаю префикс Wine: $WINE_PREFIX"
-  echo "    первый запуск занимает до минуты"
-  # mscoree и mshtml отключены, чтобы Wine не предлагал доставить Mono и Gecko:
-  # Electron-приложению они не нужны
-  WINEPREFIX="$WINE_PREFIX" WINEDLLOVERRIDES="mscoree=d;mshtml=d" \
-    wineboot -u >/dev/null 2>&1 || true
-  [ -d "$WINE_PREFIX/drive_c" ] || die "не удалось создать префикс: $WINE_PREFIX
-Попробуйте вручную:
-  WINEPREFIX='$WINE_PREFIX' wineboot -u"
+if [ ! -d "$WINEPREFIX/drive_c" ]; then
+  step "Создаю префикс $WINEPREFIX"
+  # mscoree и mshtml отключены, чтобы Wine не предлагал поставить Mono и Gecko:
+  # Коммандеру они не нужны
+  WINEDLLOVERRIDES="mscoree=d;mshtml=d" wineboot -u >/dev/null 2>&1 || true
+  [ -d "$WINEPREFIX/drive_c" ] || die "не удалось создать префикс $WINEPREFIX"
 fi
 
-# --- распаковка --------------------------------------------------------------
-
-TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
-
-step "Распаковываю установщик"
-( cd "$TMP" && 7z x "$INSTALLER" >/dev/null 2>&1 ) \
-  || die "не удалось распаковать файл:
-  $INSTALLER
-Похоже, он повреждён или это не установщик Коммандера. Проверить можно так:
-  7z l \"$INSTALLER\""
-
-if [ ! -f "$TMP/\$PLUGINSDIR/app-32.7z" ]; then
-  die "внутри установщика нет app-32.7z, вероятно изменился формат сборки.
-Внутри обнаружено: $(ls -A "$TMP" 2>/dev/null | tr '\n' ' ')"
-fi
-
-7z x "$TMP/\$PLUGINSDIR/app-32.7z" -o"$TMP/app" >/dev/null \
-  || die "не удалось распаковать app-32.7z"
-[ -f "$TMP/app/Direct Commander.exe" ] \
-  || die "в распакованном приложении нет «Direct Commander.exe»"
+step "Отключаю заглушку PowerShell (Wine bug 59670)"
+wine reg add 'HKCU\Software\Wine\DllOverrides' /v powershell.exe /d '' /f >/dev/null 2>&1 \
+  || die "не удалось записать настройку в реестр префикса"
 
 # --- установка ---------------------------------------------------------------
 
-step "Копирую приложение в префикс"
-rm -rf "$TARGET"
-mkdir -p "$TARGET"
-cp -r "$TMP/app/." "$TARGET/"
-[ -f "$TARGET/Direct Commander.exe" ] || die "копирование не удалось, проверьте свободное место"
+step "Запускаю официальный установщик, окон не будет"
+wine "$INSTALLER" /S >/dev/null 2>&1 || true
+# ждём, пока закончит и установщик, и Wine, который делает ярлыки
+wineserver -w
 
-step "Готовлю иконку"
-ICON_LINE=""
-if command -v wrestool >/dev/null 2>&1 && command -v icotool >/dev/null 2>&1; then
-  mkdir -p "$TMP/ico" "$(dirname "$ICON")"
-  wrestool -x -t 14 "$TARGET/Direct Commander.exe" -o "$TMP/ico" >/dev/null 2>&1 || true
-  icotool -x -o "$TMP/ico" "$TMP"/ico/*.ico >/dev/null 2>&1 || true
-  BIGGEST="$(ls -S "$TMP"/ico/*.png 2>/dev/null | head -1 || true)"
-  if [ -n "$BIGGEST" ]; then
-    cp "$BIGGEST" "$ICON"
-    ICON_LINE="Icon=$ICON"
-    echo "    иконка: $ICON"
-  else
-    echo "    иконку из exe достать не удалось, ярлык будет без неё"
-  fi
-else
-  echo "    icoutils не установлен, шаг пропущен (sudo apt install -y icoutils)"
-fi
+[ -f "$TARGET/Direct Commander.exe" ] || die "приложение не установилось.
+Проверьте, что Wine стоковый, а не игровая сборка (soda, Proton)."
 
-step "Создаю скрипт запуска"
-mkdir -p "$(dirname "$LAUNCHER")"
-cat > "$LAUNCHER" <<EOF
-#!/usr/bin/env bash
-# Запуск Яндекс Директ Коммандера в префиксе $WINE_PREFIX
-#
-# Важно: нужна стоковая сборка Wine (winehq-stable и подобные).
-# На игровых сборках (soda, Proton и подобных) приложение молча
-# падает при создании окна.
-#
-# Если окно так и не появляется, попробуйте отключить DirectComposition:
-#   DC_ARGS=--disable-direct-composition $APP_ID
+# виндовый ярлык от установщика; линуксовый Wine сделал рядом
+rm -f "$WIN_HOME/Desktop/Direct Commander.lnk"
 
-export WINEPREFIX='$WINE_PREFIX'
-cd '$TARGET' || exit 1
-exec wine 'Direct Commander.exe' \${DC_ARGS:-}
-EOF
-chmod +x "$LAUNCHER"
-
-step "Создаю ярлык в меню"
-mkdir -p "$(dirname "$DESKTOP")"
-{
-  echo "[Desktop Entry]"
-  echo "Type=Application"
-  echo "Name=$APP_NAME"
-  echo "Comment=Яндекс Директ Коммандер через Wine"
-  echo "Exec=$LAUNCHER"
-  [ -n "$ICON_LINE" ] && echo "$ICON_LINE"
-  echo "Terminal=false"
-  echo "Categories=Office;Network;"
-} > "$DESKTOP"
-
-command -v update-desktop-database >/dev/null 2>&1 \
-  && update-desktop-database "$(dirname "$DESKTOP")" >/dev/null 2>&1 || true
-
-printf '\nГотово.\n\n'
-printf 'Запуск:            %s\n' "$LAUNCHER"
-printf 'Или из меню:       «%s»\n' "$APP_NAME"
-printf 'Файлы приложения:  %s\n' "$TARGET"
-printf 'Данные и логи:     %s\n' "$WINE_PREFIX/drive_c/users/$USER/AppData/Roaming/direct-commander"
-printf '\nЕсли %s нет в PATH, добавьте в ~/.bashrc:\n    export PATH="$HOME/bin:$PATH"\n' "$HOME/bin"
-printf '\nЕсли это было обновление и Коммандер был открыт, закройте и запустите его заново.\n'
+printf '\nГотово. Ярлык «Direct Commander» в меню и на рабочем столе.\n'
+printf 'Данные: %s\n' "$WIN_HOME/AppData/Roaming/direct-commander"
